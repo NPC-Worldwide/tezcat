@@ -20,6 +20,10 @@ let backendProcess: ReturnType<typeof spawn> | null = null;
 
 function killBackendProcess() {
   if (!backendProcess) return;
+  if (!backendProcess.pid) {
+    backendProcess = null;
+    return;
+  }
   console.log('[Main] Killing backend process');
   if (process.platform === 'win32') {
     try { require('child_process').execSync(`taskkill /F /T /PID ${backendProcess.pid}`, { stdio: 'ignore' }); } catch {}

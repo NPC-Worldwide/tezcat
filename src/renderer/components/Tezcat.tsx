@@ -19,7 +19,7 @@ import type {
 import {
     GISMapView, featuresToGeoJSON, geoJSONToFeatures,
     BASEMAPS, LAYER_COLORS, DEFAULT_PROJECT, REFERENCE_LAYERS, TILE_OVERLAYS,
-    MindMapViewer as NpctsMindMapViewer, RadioPane
+    MindMapViewer as NpctsMindMapViewer, RadioPane, EarthView
 } from 'npcts';
 import { demoMaps } from '../lib/cartoglyphLibrary';
 
@@ -66,7 +66,7 @@ async function parseKML(text: string): Promise<any> {
 
 // ---- Main wrapper component ----
 
-type ActiveTab = 'gis' | 'mindmap' | 'radio' | 'data';
+type ActiveTab = 'gis' | 'mindmap' | 'radio' | 'data' | 'globe';
 
 const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     const [activeTab, setActiveTab] = useState<ActiveTab>('gis');
@@ -452,7 +452,7 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
 
     const exportKML = useCallback(async () => {
         const { default: tokmlFn } = await import('tokml');
-        const kmlString = tokmlFn(featuresToGeoJSON(project.features.filter(f => f.visible)));
+        const kmlString = tokmlFn(featuresToGeoJSON(project.features.filter(f => f.visible)), 'default', {});
         const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([kmlString], { type: 'application/vnd.google-earth.kml+xml' })); a.download = `${project.name.replace(/\s+/g, '_')}.kml`; a.click();
         setShowExportMenu(false);
     }, [project]);
@@ -474,7 +474,7 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     ];
 
     return (
-        <div className="h-full flex flex-col theme-bg-primary">
+        <div className="h-full w-full flex flex-col theme-bg-primary">
             {/* Tab bar + toolbar */}
             <div className="flex-shrink-0 border-b theme-border px-1.5 py-1 flex items-center gap-1.5 theme-bg-secondary">
                 {/* Tab switcher */}
@@ -490,6 +490,9 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                     </button>
                     <button onClick={() => setActiveTab('data')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'data' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <Download size={12} /> Data
+                    </button>
+                    <button onClick={() => setActiveTab('globe')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'globe' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
+                        <Globe size={12} /> Globe
                     </button>
                 </div>
 
@@ -1036,7 +1039,7 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                                                     try {
                                                         const resp = await proxyFetch(ds.url);
                                                         const data = await resp.json();
-                                                        const features = geoJSONToFeatures(data);
+                                                        const features = geoJSONToFeatures(data, 'imported', '#3b82f6');
                                                         updateProject(prev => ({ ...prev, features: [...prev.features, ...features] }));
                                                         setActiveTab('gis');
                                                     } catch (err) {
@@ -1060,6 +1063,12 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                             </div>
                         ))}
                     </div>
+                </div>
+            )}
+
+            {activeTab === 'globe' && (
+                <div className="flex-1 w-full min-w-0 overflow-hidden relative">
+                    <EarthView className="w-full min-w-0" />
                 </div>
             )}
         </div>
