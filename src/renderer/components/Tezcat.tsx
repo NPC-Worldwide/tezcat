@@ -19,8 +19,9 @@ import type {
 import {
     GISMapView, featuresToGeoJSON, geoJSONToFeatures,
     BASEMAPS, LAYER_COLORS, DEFAULT_PROJECT, REFERENCE_LAYERS, TILE_OVERLAYS,
-    MindMapViewer as NpctsMindMapViewer, RadioPane, EarthView
+    MindMapViewer as NpctsMindMapViewer, RadioPane
 } from 'npcts';
+import EarthView from './EarthView';
 import { demoMaps } from '../lib/cartoglyphLibrary';
 
 // ---- Proxy fetch through Electron main process (bypasses CORS) ----
