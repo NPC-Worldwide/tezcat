@@ -7,6 +7,15 @@ export interface IElectronAPI {
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
   proxyFetch: (url: string, options?: any) => Promise<any>;
+  windowControls: {
+    minimize: () => void;
+    maximize: () => void;
+    close: () => void;
+  };
+  windowState: {
+    isMaximized: () => Promise<boolean>;
+  };
+  onWindowStateChange: (callback: (state: { isMaximized: boolean }) => void) => () => void;
   checkForUpdates: () => Promise<any>;
   getAppVersion: () => Promise<string>;
   downloadAndInstallUpdate: (opts: { releaseUrl: string }) => Promise<any>;

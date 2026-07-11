@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const IS_DEV = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+const ICON_PATH = path.join(__dirname, '..', 'tezcat.png');
 const BACKEND_PORT = IS_DEV ? '7141' : '5141';
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
@@ -18,6 +19,7 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 let backendProcess: ReturnType<typeof spawn> | null = null;
+let mainWindow: BrowserWindow | null = null;
 
 function killBackendProcess() {
   if (!backendProcess) return;
@@ -128,12 +130,13 @@ async function startBackend() {
 app.on('before-quit', () => killBackendProcess());
 
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
+    ...(fs.existsSync(ICON_PATH) ? { icon: ICON_PATH } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -143,11 +146,15 @@ function createWindow() {
     },
   });
 
+  // Track maximize state changes for the custom title bar
+  mainWindow.on('maximize', () => mainWindow?.webContents.send('window-state-changed', { isMaximized: true }));
+  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window-state-changed', { isMaximized: false }));
+
   if (IS_DEV) {
-    win.loadURL('http://localhost:7341');
-    win.webContents.openDevTools();
+    mainWindow.loadURL('http://localhost:7341');
+    mainWindow.webContents.openDevTools();
   } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 }
 
@@ -244,7 +251,14 @@ ipcMain.handle('proxy-fetch', async (_event, url, options = {}) => {
   }
 });
 
-ipcMain.on('window-close', () => BrowserWindow.getFocusedWindow()?.close());
+ipcMain.on('window-close', () => mainWindow?.close());
+ipcMain.on('window-minimize', () => mainWindow?.minimize());
+ipcMain.on('window-maximize', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+});
+ipcMain.handle('window-is-maximized', () => mainWindow?.isMaximized() ?? false);
 
 // ─── Update checker ───
 const fsPromises = fs.promises;

@@ -3,9 +3,8 @@ import {
     Save, Download, Upload, Plus, Trash2, X, Eye, Edit2, Layers,
     Search, Navigation, Ruler, FileJson, Globe, MapPin,
     ChevronDown, ChevronRight, EyeOff, Route, Hexagon, Circle,
-    LocateFixed, Copy, Network, Map as MapIcon, BookOpen
+    LocateFixed, Copy, Map as MapIcon, BookOpen
 } from 'lucide-react';
-import UpdateChecker from './UpdateChecker';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -14,15 +13,13 @@ const leafletStyle = document.createElement('style');
 leafletStyle.textContent = '.leaflet-control-attribution { display: none !important; }';
 document.head.appendChild(leafletStyle);
 import type {
-    GISProject, GeoFeature, MapLayer, DrawMode, GISMapViewProps,
-    MindMapData
+    GISProject, GeoFeature, MapLayer, DrawMode, GISMapViewProps
 } from 'npcts';
 import {
     GISMapView, featuresToGeoJSON, geoJSONToFeatures,
     BASEMAPS, LAYER_COLORS, DEFAULT_PROJECT, REFERENCE_LAYERS, TILE_OVERLAYS,
-    MindMapViewer as NpctsMindMapViewer, RadioPane
+    RadioPane, EarthView
 } from 'npcts';
-import EarthView from './EarthView';
 import { demoMaps } from '../lib/cartoglyphLibrary';
 
 // ---- Proxy fetch through Electron main process (bypasses CORS) ----
@@ -36,27 +33,6 @@ async function proxyFetch(url: string, options?: any): Promise<Response> {
     return fetch(url, options);
 }
 
-// ---- Legacy .mapx conversion ----
-
-function convertLegacyMapx(data: any): GISProject {
-    const features: GeoFeature[] = (data.nodes || []).map((n: any) => ({
-        id: n.id,
-        type: 'marker' as const,
-        name: n.label || 'Node',
-        coordinates: [n.lat || n.y || 0, n.lng || n.x || 0] as [number, number],
-        color: n.color || '#3b82f6',
-        visible: true,
-        layerId: 'default',
-        properties: {},
-    }));
-    return {
-        ...DEFAULT_PROJECT,
-        name: data.name || 'Imported Map',
-        layers: [{ id: 'default', name: 'Imported', visible: true, color: '#3b82f6', features: features.map(f => f.id), locked: false }],
-        features,
-    };
-}
-
 // ---- KML parsing ----
 
 async function parseKML(text: string): Promise<any> {
@@ -68,7 +44,7 @@ async function parseKML(text: string): Promise<any> {
 
 // ---- Main wrapper component ----
 
-type ActiveTab = 'gis' | 'mindmap' | 'radio' | 'data' | 'globe';
+type ActiveTab = 'gis' | 'radio' | 'data' | 'globe';
 
 const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     const [activeTab, setActiveTab] = useState<ActiveTab>('gis');
@@ -207,11 +183,8 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
         return () => { map.off('moveend', handler); };
     }, [scheduleOsintRefresh]);
 
-    // Mind Map state
-    const [mindMapData, setMindMapData] = useState<MindMapData | null>(null);
-
     const filePath = propFilePath;
-    const isStandalone = !filePath || filePath === 'cartoglyph' || filePath === 'mindmap-standalone';
+    const isStandalone = !filePath || filePath === 'cartoglyph';
 
     // Load project
     useEffect(() => {
@@ -225,11 +198,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                     if (data.version === 2) {
                         setProject(data);
                         setActiveTab('gis');
-                    } else if (data.mapType || data.nodes) {
-                        // Legacy mind map format
-                        setMindMapData(data);
-                        setProject(convertLegacyMapx(data));
-                        setActiveTab('mindmap');
                     }
                 }
             } catch (err) {
@@ -426,9 +394,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                         return { id: `csv_${Date.now()}_${i}`, type: 'marker' as const, name: nameIdx >= 0 ? cols[nameIdx] : `Point ${i + 1}`, coordinates: [lat, lng] as [number, number], color: layerColor, visible: true, layerId: newLayerId, properties: Object.fromEntries(headers.map((h, hi) => [h, cols[hi]])) };
                     }).filter(Boolean) as GeoFeature[];
                 }
-            } else if (ext === 'mapx') {
-                const data = JSON.parse(text);
-                features = convertLegacyMapx(data).features.map(f => ({ ...f, layerId: newLayerId }));
             }
         } catch (err) { console.error('Import error:', err); return; }
 
@@ -483,9 +448,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                 <div className="flex items-center gap-0.5 px-1 py-0.5 theme-bg-tertiary rounded border theme-border mr-2">
                     <button onClick={() => setActiveTab('gis')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'gis' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <MapIcon size={12} /> GIS Map
-                    </button>
-                    <button onClick={() => setActiveTab('mindmap')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'mindmap' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
-                        <Network size={12} /> Mind Map
                     </button>
                     <button onClick={() => setActiveTab('radio')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'radio' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <Navigation size={12} /> Radio
@@ -590,9 +552,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                                         <button onClick={() => { fileInputRef.current?.setAttribute('accept', '.csv,.tsv'); fileInputRef.current?.click(); }} className="flex items-center gap-2 px-3 py-1.5 w-full text-left text-xs theme-text-primary hover:theme-bg-tertiary">
                                             <Layers size={12} className="text-yellow-400" /> <div><span className="font-medium">CSV / TSV</span><br /><span className="text-[10px] theme-text-muted">Spreadsheet with lat, lng, name columns</span></div>
                                         </button>
-                                        <button onClick={() => { fileInputRef.current?.setAttribute('accept', '.mapx'); fileInputRef.current?.click(); }} className="flex items-center gap-2 px-3 py-1.5 w-full text-left text-xs theme-text-primary hover:theme-bg-tertiary">
-                                            <MapIcon size={12} className="text-emerald-400" /> <div><span className="font-medium">MAPX Project</span><br /><span className="text-[10px] theme-text-muted">Cartoglyph native project file</span></div>
-                                        </button>
                                         <div className="border-t theme-border my-1" />
                                         <div className="px-3 py-1 text-[10px] theme-text-muted border-b theme-border">Download template</div>
                                         <button onClick={() => {
@@ -610,7 +569,7 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                                     </div>
                                 </>
                             )}
-                            <input ref={fileInputRef} type="file" accept=".geojson,.json,.kml,.csv,.mapx,.gpx,.kmz,.tsv" className="hidden" onChange={handleFileImport} />
+                            <input ref={fileInputRef} type="file" accept=".geojson,.json,.kml,.csv,.gpx,.kmz,.tsv" className="hidden" onChange={handleFileImport} />
                         </div>
 
                         {/* Export */}
@@ -672,7 +631,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                 )}
 
                 <div className="flex-1" />
-                <UpdateChecker />
             </div>
 
             {/* Content */}
@@ -905,21 +863,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                             color: OSINT_PRESETS[k]?.color || '#f59e0b',
                             markers: osintCache[k].results,
                         }))}
-                    />
-                </div>
-            )}
-
-            {activeTab === 'mindmap' && (
-                <div className="flex-1 overflow-hidden">
-                    <NpctsMindMapViewer
-                        initialData={mindMapData || undefined}
-                        onChange={(data) => setMindMapData(data)}
-                        onSave={async (data) => {
-                            if (!isStandalone && filePath) {
-                                await (window as any).api?.writeFile?.(filePath, JSON.stringify(data, null, 2));
-                            }
-                        }}
-                        defaultEditMode={true}
                     />
                 </div>
             )}

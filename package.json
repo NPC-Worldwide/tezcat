@@ -1,7 +1,7 @@
 {
   "name": "tezcat",
   "version": "0.1.0",
-  "description": "Tezcat - A standalone GIS and cartography studio",
+  "description": "Tezcat - A GIS and cartography studio",
   "author": "Chris Agostino <info@npcworldwi.de>",
   "license": "MIT",
   "type": "module",
@@ -29,6 +29,7 @@
     "react-dom": "^19.0.0",
     "react-leaflet": "^5.0.0",
     "three": "^0.176.0",
+    "three-stdlib": "^2.36.1",
     "tokml": "^0.4.0",
     "zustand": "^5.0.2"
   },
@@ -59,6 +60,7 @@
       "package.json"
     ],
     "mac": {
+      "icon": "tezcat.png",
       "target": [
         {
           "target": "dmg",
@@ -70,9 +72,11 @@
       "category": "public.app-category.productivity"
     },
     "win": {
+      "icon": "tezcat.png",
       "target": "nsis"
     },
     "linux": {
+      "icon": "tezcat.png",
       "target": [
         "deb",
         "AppImage"
