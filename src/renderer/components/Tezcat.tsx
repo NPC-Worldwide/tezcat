@@ -18,7 +18,7 @@ import type {
 import {
     GISMapView, featuresToGeoJSON, geoJSONToFeatures,
     BASEMAPS, LAYER_COLORS, DEFAULT_PROJECT, REFERENCE_LAYERS, TILE_OVERLAYS,
-    RadioPane, EarthView
+    EarthView
 } from 'npcts';
 import { demoMaps } from '../lib/cartoglyphLibrary';
 
@@ -44,7 +44,7 @@ async function parseKML(text: string): Promise<any> {
 
 // ---- Main wrapper component ----
 
-type ActiveTab = 'gis' | 'radio' | 'data' | 'globe';
+type ActiveTab = 'gis' | 'data' | 'globe';
 
 const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     const [activeTab, setActiveTab] = useState<ActiveTab>('gis');
@@ -448,9 +448,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                 <div className="flex items-center gap-0.5 px-1 py-0.5 theme-bg-tertiary rounded border theme-border mr-2">
                     <button onClick={() => setActiveTab('gis')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'gis' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <MapIcon size={12} /> GIS Map
-                    </button>
-                    <button onClick={() => setActiveTab('radio')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'radio' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
-                        <Navigation size={12} /> Radio
                     </button>
                     <button onClick={() => setActiveTab('data')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'data' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <Download size={12} /> Data
@@ -863,45 +860,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                             color: OSINT_PRESETS[k]?.color || '#f59e0b',
                             markers: osintCache[k].results,
                         }))}
-                    />
-                </div>
-            )}
-
-            {activeTab === 'radio' && (
-                <div className="flex-1 overflow-hidden">
-                    <RadioPane
-                        fetchFn={async (url: string, options?: any) => {
-                            const api = (window as any).api;
-                            if (api?.proxyFetch) {
-                                const result = await api.proxyFetch(url, options);
-                                return { ok: result.status >= 200 && result.status < 300, status: result.status, data: result.data, error: result.error };
-                            }
-                            try {
-                                const resp = await fetch(url, options);
-                                const ct = resp.headers.get('content-type') || '';
-                                const data = ct.includes('json') ? await resp.json() : await resp.text();
-                                return { ok: resp.ok, status: resp.status, data };
-                            } catch (err: any) {
-                                return { ok: false, status: 0, data: null, error: err.message };
-                            }
-                        }}
-                        onShowOnMap={(markers) => {
-                            const newFeatures: GeoFeature[] = markers.map((m, i) => ({
-                                id: `radio_${Date.now()}_${i}`,
-                                type: 'marker' as const,
-                                name: m.label,
-                                coordinates: [m.lat, m.lng] as [number, number],
-                                color: m.color || '#10b981',
-                                visible: true,
-                                layerId: 'default',
-                                properties: { source: 'radio' },
-                            }));
-                            updateProject(prev => ({
-                                ...prev,
-                                features: [...prev.features, ...newFeatures],
-                            }));
-                            setActiveTab('gis');
-                        }}
                     />
                 </div>
             )}
