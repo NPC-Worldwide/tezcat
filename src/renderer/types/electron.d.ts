@@ -7,6 +7,12 @@ export interface IElectronAPI {
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
   proxyFetch: (url: string, options?: any) => Promise<any>;
+  checkForUpdates: () => Promise<any>;
+  getAppVersion: () => Promise<string>;
+  downloadAndInstallUpdate: (opts: { releaseUrl: string }) => Promise<any>;
+  onUpdateDownloadProgress: (cb: (data: { progress: number; receivedBytes: number; totalBytes: number }) => void) => () => void;
+  openExternal: (url: string) => Promise<any>;
+  closeWindow: () => void;
 }
 declare global {
   interface Window {

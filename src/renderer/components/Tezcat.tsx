@@ -5,6 +5,7 @@ import {
     ChevronDown, ChevronRight, EyeOff, Route, Hexagon, Circle,
     LocateFixed, Copy, Network, Map as MapIcon, BookOpen
 } from 'lucide-react';
+import UpdateChecker from './UpdateChecker';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -671,6 +672,7 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                 )}
 
                 <div className="flex-1" />
+                <UpdateChecker />
             </div>
 
             {/* Content */}

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
 export interface IElectronAPI {
   readDirectory: (dirPath: string) => Promise<any>;
@@ -9,6 +9,12 @@ export interface IElectronAPI {
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
   proxyFetch: (url: string, options?: any) => Promise<any>;
+  checkForUpdates: () => Promise<any>;
+  getAppVersion: () => Promise<string>;
+  downloadAndInstallUpdate: (opts: { releaseUrl: string }) => Promise<any>;
+  onUpdateDownloadProgress: (cb: (data: { progress: number; receivedBytes: number; totalBytes: number }) => void) => () => void;
+  openExternal: (url: string) => Promise<any>;
+  closeWindow: () => void;
 }
 
 contextBridge.exposeInMainWorld('api', {
@@ -20,6 +26,16 @@ contextBridge.exposeInMainWorld('api', {
   readFileContent: (filePath: string) => ipcRenderer.invoke('read-file-content', filePath),
   writeFileContent: (filePath: string, content: string) => ipcRenderer.invoke('write-file-content', filePath, content),
   proxyFetch: (url: string, options?: any) => ipcRenderer.invoke('proxy-fetch', url, options),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  downloadAndInstallUpdate: (opts: any) => ipcRenderer.invoke('download-and-install-update', opts),
+  onUpdateDownloadProgress: (cb: any) => {
+    const handler = (_event: IpcRendererEvent, data: any) => cb(data);
+    ipcRenderer.on('update-download-progress', handler);
+    return () => ipcRenderer.removeListener('update-download-progress', handler);
+  },
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  closeWindow: () => ipcRenderer.send('window-close'),
 } as IElectronAPI);
 
 declare global {
