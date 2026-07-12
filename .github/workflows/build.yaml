@@ -56,8 +56,7 @@ jobs:
             windows) npx electron-builder --win --publish=never ;;
             macos)   npx electron-builder --mac --publish=never ;;
           esac
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+        # Allow electron-builder to auto-discover signing identity (falls back to ad-hoc if none found)
 
       - name: Prepare files for upload
         id: prepare
