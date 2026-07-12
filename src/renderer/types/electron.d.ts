@@ -7,6 +7,7 @@ export interface IElectronAPI {
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
   proxyFetch: (url: string, options?: any) => Promise<any>;
+  proxyTile: (url: string) => Promise<{ ok: boolean; status: number; data?: string; error?: string }>;
   windowControls: {
     minimize: () => void;
     maximize: () => void;

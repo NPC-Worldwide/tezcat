@@ -33,6 +33,148 @@ async function proxyFetch(url: string, options?: any): Promise<Response> {
     return fetch(url, options);
 }
 
+// ---- Weather OSINT helpers: fetch forecast geography as vector layers ----
+
+const NWS_SEVERITY_COLOR: Record<string, string> = {
+    extreme: '#7f1d1d',
+    severe: '#ef4444',
+    moderate: '#f97316',
+    minor: '#eab308',
+    unknown: '#94a3b8',
+};
+
+function nwsAlertColor(severity?: string): string {
+    return NWS_SEVERITY_COLOR[(severity || 'unknown').toLowerCase()] || NWS_SEVERITY_COLOR.unknown;
+}
+
+async function fetchXML(url: string): Promise<Document> {
+    const resp = await proxyFetch(url, { headers: { 'User-Agent': 'Incognide-Tezcat/1.0' } });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const text = await resp.text();
+    return new DOMParser().parseFromString(text, 'text/xml');
+}
+
+async function fetchNWSAlerts(bounds: L.LatLngBounds): Promise<any[]> {
+    const c = bounds.getCenter();
+    const url = `https://api.weather.gov/alerts/active?status=actual&message_type=alert,update&point=${c.lat.toFixed(4)},${c.lng.toFixed(4)}`;
+    const resp = await proxyFetch(url, { headers: { 'User-Agent': 'Incognide-Tezcat/1.0' } });
+    if (!resp.ok) throw new Error(`NWS ${resp.status}`);
+    const data = await resp.json();
+    return (data.features || []).map((f: any) => {
+        const props = f.properties || {};
+        let lat = c.lat, lng = c.lng;
+        let geometry = f.geometry;
+        if (geometry?.type === 'Polygon' && geometry.coordinates?.[0]?.length) {
+            const ring = geometry.coordinates[0];
+            const [sumLng, sumLat] = ring.reduce((acc: [number, number], coord: number[]) => [acc[0] + coord[0], acc[1] + coord[1]], [0, 0]);
+            lng = sumLng / ring.length;
+            lat = sumLat / ring.length;
+        }
+        return {
+            lat, lng,
+            name: props.event || 'Weather Alert',
+            source: 'nws',
+            category: `weather:alert:${props.severity || 'unknown'}`,
+            fullName: props.headline || props.areaDesc || props.description || '',
+            color: nwsAlertColor(props.severity),
+            geometry,
+            tags: { ...props, source: 'nws' },
+        };
+    });
+}
+
+async function fetchWPCSurface(): Promise<any[]> {
+    // WPC surface analysis KML: fronts, highs/lows, precipitation areas
+    const url = 'https://www.wpc.ncep.noaa.gov/kml/sfc/all.kmz';
+    try {
+        const resp = await proxyFetch(url, { headers: { 'User-Agent': 'Incognide-Tezcat/1.0' } });
+        if (!resp.ok) throw new Error(`WPC ${resp.status}`);
+        const arrayBuffer = await resp.arrayBuffer();
+        const zip = await import('jszip').then(m => m.default || m);
+        const z = await zip.loadAsync(arrayBuffer);
+        const kmlFile = Object.keys(z.files).find(n => n.endsWith('.kml'));
+        if (!kmlFile) throw new Error('No KML in KMZ');
+        const kmlText = await z.files[kmlFile].async('text');
+        const doc = new DOMParser().parseFromString(kmlText, 'text/xml');
+        const { kml } = await import('@tmcw/togeojson');
+        const geojson = kml(doc);
+        const out: any[] = [];
+        (geojson.features || []).forEach((f: any, i: number) => {
+            const props = f.properties || {};
+            const name = props.name || `Surface ${i + 1}`;
+            const desc = props.description || '';
+            const color = desc.toLowerCase().includes('cold')
+                ? '#3b82f6'
+                : desc.toLowerCase().includes('warm')
+                    ? '#ef4444'
+                    : desc.toLowerCase().includes('occluded')
+                        ? '#a855f7'
+                        : desc.toLowerCase().includes('stationary')
+                            ? '#22d3ee'
+                            : '#f59e0b';
+            let lat: number | undefined, lng: number | undefined;
+            const geom = f.geometry;
+            if (geom?.type === 'Point' && geom.coordinates) {
+                [lng, lat] = geom.coordinates;
+            } else if ((geom?.type === 'LineString' || geom?.type === 'Polygon') && geom.coordinates?.length) {
+                const ring = geom.type === 'Polygon' ? geom.coordinates[0] : geom.coordinates;
+                const [sumLng, sumLat] = ring.reduce((acc: [number, number], c: number[]) => [acc[0] + c[0], acc[1] + c[1]], [0, 0]);
+                lng = sumLng / ring.length;
+                lat = sumLat / ring.length;
+            }
+            out.push({
+                id: `wpc_${i}`,
+                name,
+                source: 'wpc',
+                category: `weather:surface:${(f.geometry?.type || 'unknown').toLowerCase()}`,
+                color,
+                geometry: geom,
+                lat,
+                lng,
+                tags: { ...props, source: 'wpc' },
+            });
+        });
+        return out;
+    } catch (err) {
+        console.error('WPC surface fetch error:', err);
+        return [];
+    }
+}
+
+async function fetchNHCStorms(): Promise<any[]> {
+    // NHC active storms Atlantic + Pacific
+    try {
+        const resp = await proxyFetch('https://www.nhc.noaa.gov/ftp/pub/forecast/active/', { headers: { 'User-Agent': 'Incognide-Tezcat/1.0' } });
+        // Active storm list is not a clean JSON endpoint; use the GIS feed instead.
+        // NHC RSS feed + GIS shapefiles: https://www.nhc.noaa.gov/gis/
+        const gisResp = await proxyFetch('https://www.nhc.noaa.gov/ftp/pub/forecast/advisories/', { headers: { 'User-Agent': 'Incognide-Tezcat/1.0' } });
+        // Fallback: try the NHC GIS active storms GeoJSON (if available)
+        const jsonResp = await proxyFetch('https://www.nhc.noaa.gov/CurrentStorms.json', { headers: { 'User-Agent': 'Incognide-Tezcat/1.0' } });
+        if (!jsonResp.ok) throw new Error(`NHC ${jsonResp.status}`);
+        const data = await jsonResp.json();
+        const out: any[] = [];
+        (data.activeStorms || []).forEach((s: any) => {
+            const c = s.center || {};
+            if (c.latitude != null && c.longitude != null) {
+                out.push({
+                    id: s.id,
+                    name: `${s.name || s.stormName || 'Storm'} ${s.classification || ''}`,
+                    source: 'nhc',
+                    category: `weather:storm:${(s.classification || 'unknown').toLowerCase()}`,
+                    color: s.classification?.toLowerCase().includes('hurricane') ? '#ef4444' : '#f97316',
+                    lat: parseFloat(c.latitude),
+                    lng: parseFloat(c.longitude),
+                    tags: { ...s, source: 'nhc' },
+                });
+            }
+        });
+        return out;
+    } catch (err) {
+        console.error('NHC fetch error:', err);
+        return [];
+    }
+}
+
 // ---- KML parsing ----
 
 async function parseKML(text: string): Promise<any> {
@@ -42,9 +184,67 @@ async function parseKML(text: string): Promise<any> {
     return kml(doc);
 }
 
+// ---- Weather forecast tile overlays ----
+// RainViewer's public API returns a short path (e.g. /v2/radar/643d69b227de) per frame.
+// Tile URLs are: {host}{path}/256/{z}/{x}/{y}/{color}/{smooth}_{snow}.png
+// We leave {z}/{x}/{y} as Leaflet placeholders so every tile gets the right coordinates.
+type RainViewerFrame = { time: number; path: string };
+type RainViewerMeta = { host: string; radarFrame: RainViewerFrame; nowcastFrames: RainViewerFrame[] };
+
+const WEATHER_LAYERS: Record<string, {
+    name: string;
+    getUrl: (forecastHour: number, meta?: RainViewerMeta) => string;
+    opacity: number;
+    forecastable: boolean;
+    bounds?: [[number, number], [number, number]];
+    wms?: { layers: string; format?: string; transparent?: boolean };
+}> = {
+    radar: {
+        name: 'NEXRAD Radar',
+        getUrl: (_h, meta) => meta?.radarFrame?.path
+            ? `${meta.host}${meta.radarFrame.path}/256/{z}/{x}/{y}/2/1_1.png`
+            : '',
+        opacity: 0.65,
+        forecastable: false,
+    },
+    precip_nowcast: {
+        name: 'Precip Nowcast',
+        getUrl: (h, meta) => {
+            // RainViewer nowcast frames are ~10-minute intervals. Prefer those when available.
+            const frames = meta?.nowcastFrames || [];
+            if (frames.length) {
+                const idx = Math.min(Math.max(0, Math.round(h * 6)), frames.length - 1);
+                const frame = frames[idx];
+                return frame?.path ? `${meta!.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png` : '';
+            }
+            // Fallback: IEM HRRR forecast reflectivity (FXXXX is forecast minute, 0-1080 / 18 h)
+            const minute = Math.min(Math.round(h * 60), 1080);
+            const f = minute.toString().padStart(4, '0');
+            return `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/hrrr::REFD-F${f}-0/{z}/{x}/{y}.png`;
+        },
+        opacity: 0.65,
+        forecastable: true,
+    },
+    satellite: {
+        name: 'GOES Satellite',
+        getUrl: () => `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes_east_conus_ch13/{z}/{x}/{y}.png`,
+        opacity: 0.6,
+        forecastable: false,
+        bounds: [[24.0, -107.0], [50.0, -60.0]],
+    },
+    warnings: {
+        name: 'NWS Warnings',
+        getUrl: () => `https://mesonet.agron.iastate.edu/cgi-bin/wms/us/wwa.cgi`,
+        opacity: 0.65,
+        forecastable: false,
+        wms: { layers: 'warnings_p', format: 'image/png', transparent: true },
+    },
+};
+
+
 // ---- Main wrapper component ----
 
-type ActiveTab = 'gis' | 'data' | 'globe';
+type ActiveTab = 'gis' | 'globe';
 
 const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     const [activeTab, setActiveTab] = useState<ActiveTab>('gis');
@@ -55,11 +255,17 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
     const [hasChanges, setHasChanges] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-    const [sidebarTab, setSidebarTab] = useState<'layers' | 'properties' | 'osint' | 'overlays'>('layers');
+    const [sidebarTab, setSidebarTab] = useState<'layers' | 'properties' | 'osint' | 'overlays' | 'weather'>('layers');
     const [activeOverlays, setActiveOverlays] = useState<Set<string>>(new Set());
     const [activeTileOverlays, setActiveTileOverlays] = useState<Set<string>>(new Set());
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [activeLayerId, setActiveLayerId] = useState('default');
+
+    // Weather forecast overlays
+    const [activeWeatherLayers, setActiveWeatherLayers] = useState<Set<string>>(new Set());
+    const [forecastHour, setForecastHour] = useState(0);
+    const [rainViewerMeta, setRainViewerMeta] = useState<RainViewerMeta | null>(null);
+    const weatherLayerRefs = useRef<Record<string, L.Layer>>({});
 
     // OSINT auto-cache
     const [osintCache, setOsintCache] = useState<Record<string, { results: any[]; bbox: string }>>({});
@@ -91,27 +297,32 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // OSINT preset categories
-    const OSINT_PRESETS: Record<string, { label: string; query: string; color: string; category: string }> = useMemo(() => ({
-        hospitals: { label: 'Hospitals', query: 'amenity=hospital', color: '#ef4444', category: 'emergency' },
-        police: { label: 'Police', query: 'amenity=police', color: '#3b82f6', category: 'emergency' },
-        fire_stations: { label: 'Fire Stations', query: 'amenity=fire_station', color: '#f97316', category: 'emergency' },
-        pharmacies: { label: 'Pharmacies', query: 'amenity=pharmacy', color: '#10b981', category: 'emergency' },
-        schools: { label: 'Schools', query: 'amenity=school', color: '#8b5cf6', category: 'civic' },
-        banks: { label: 'Banks', query: 'amenity=bank', color: '#eab308', category: 'civic' },
-        embassies: { label: 'Embassies', query: 'amenity=embassy', color: '#06b6d4', category: 'civic' },
-        prisons: { label: 'Prisons', query: 'amenity=prison', color: '#64748b', category: 'civic' },
-        government: { label: 'Government', query: 'office=government', color: '#a855f7', category: 'civic' },
-        military: { label: 'Military', query: 'military=yes', color: '#78716c', category: 'security' },
-        cameras: { label: 'Surveillance', query: 'man_made=surveillance', color: '#f43f5e', category: 'security' },
-        cell_towers: { label: 'Cell Towers', query: 'telecom=mast', color: '#d946ef', category: 'infrastructure' },
-        power_plants: { label: 'Power Plants', query: 'power=plant', color: '#facc15', category: 'infrastructure' },
-        gas_stations: { label: 'Gas Stations', query: 'amenity=fuel', color: '#fb923c', category: 'infrastructure' },
-        water_towers: { label: 'Water Towers', query: 'man_made=water_tower', color: '#38bdf8', category: 'infrastructure' },
-        helipads: { label: 'Helipads', query: 'aeroway=helipad', color: '#a3e635', category: 'transport' },
-        hotels: { label: 'Hotels', query: 'tourism=hotel', color: '#c084fc', category: 'commercial' },
-        restaurants: { label: 'Restaurants', query: 'amenity=restaurant', color: '#fb7185', category: 'commercial' },
-        bridges: { label: 'Bridges', query: 'man_made=bridge', color: '#94a3b8', category: 'infrastructure' },
-        dams: { label: 'Dams', query: 'waterway=dam', color: '#22d3ee', category: 'infrastructure' },
+    const OSINT_PRESETS: Record<string, { label: string; color: string; category: string; query?: string; source?: 'overpass' | 'nws' | 'wpc' | 'nhc'; geomType?: 'marker' | 'polygon' | 'line' }> = useMemo(() => ({
+        hospitals: { label: 'Hospitals', query: 'amenity=hospital', color: '#ef4444', category: 'emergency', source: 'overpass' },
+        police: { label: 'Police', query: 'amenity=police', color: '#3b82f6', category: 'emergency', source: 'overpass' },
+        fire_stations: { label: 'Fire Stations', query: 'amenity=fire_station', color: '#f97316', category: 'emergency', source: 'overpass' },
+        pharmacies: { label: 'Pharmacies', query: 'amenity=pharmacy', color: '#10b981', category: 'emergency', source: 'overpass' },
+        schools: { label: 'Schools', query: 'amenity=school', color: '#8b5cf6', category: 'civic', source: 'overpass' },
+        banks: { label: 'Banks', query: 'amenity=bank', color: '#eab308', category: 'civic', source: 'overpass' },
+        embassies: { label: 'Embassies', query: 'amenity=embassy', color: '#06b6d4', category: 'civic', source: 'overpass' },
+        prisons: { label: 'Prisons', query: 'amenity=prison', color: '#64748b', category: 'civic', source: 'overpass' },
+        government: { label: 'Government', query: 'office=government', color: '#a855f7', category: 'civic', source: 'overpass' },
+        military: { label: 'Military', query: 'military=yes', color: '#78716c', category: 'security', source: 'overpass' },
+        cameras: { label: 'Surveillance', query: 'man_made=surveillance', color: '#f43f5e', category: 'security', source: 'overpass' },
+        cell_towers: { label: 'Cell Towers', query: 'telecom=mast', color: '#d946ef', category: 'infrastructure', source: 'overpass' },
+        power_plants: { label: 'Power Plants', query: 'power=plant', color: '#facc15', category: 'infrastructure', source: 'overpass' },
+        gas_stations: { label: 'Gas Stations', query: 'amenity=fuel', color: '#fb923c', category: 'infrastructure', source: 'overpass' },
+        water_towers: { label: 'Water Towers', query: 'man_made=water_tower', color: '#38bdf8', category: 'infrastructure', source: 'overpass' },
+        helipads: { label: 'Helipads', query: 'aeroway=helipad', color: '#a3e635', category: 'transport', source: 'overpass' },
+        hotels: { label: 'Hotels', query: 'tourism=hotel', color: '#c084fc', category: 'commercial', source: 'overpass' },
+        restaurants: { label: 'Restaurants', query: 'amenity=restaurant', color: '#fb7185', category: 'commercial', source: 'overpass' },
+        bridges: { label: 'Bridges', query: 'man_made=bridge', color: '#94a3b8', category: 'infrastructure', source: 'overpass' },
+        dams: { label: 'Dams', query: 'waterway=dam', color: '#22d3ee', category: 'infrastructure', source: 'overpass' },
+        // Weather/environment OSINT (fetchable vector geography)
+        weather_stations: { label: 'Weather Stations', query: 'man_made=weather_station', color: '#60a5fa', category: 'environment', source: 'overpass' },
+        nws_alerts: { label: 'NWS Alerts (polygons)', color: '#ef4444', category: 'environment', source: 'nws', geomType: 'polygon' },
+        wpc_surface: { label: 'WPC Surface Analysis (fronts)', color: '#22d3ee', category: 'environment', source: 'wpc', geomType: 'line' },
+        nhc_storms: { label: 'NHC Active Storms', color: '#f97316', category: 'environment', source: 'nhc', geomType: 'marker' },
     }), []);
 
     // Fetch a single OSINT category for current viewport
@@ -124,23 +335,41 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
         if (osintCache[key]?.bbox === bbox) return;
         setOsintLoading(prev => new Set(prev).add(key));
         try {
-            const parts = preset.query.split('=');
-            const tagFilter = parts[1] ? `["${parts[0]}"="${parts[1]}"]` : `["${parts[0]}"]`;
-            const s = bounds.getSouth(), w = bounds.getWest(), n = bounds.getNorth(), e = bounds.getEast();
-            const q = `[out:json][timeout:25];(node${tagFilter}(${s},${w},${n},${e});way${tagFilter}(${s},${w},${n},${e}););out center body 200;`;
-            const resp = await proxyFetch('https://overpass-api.de/api/interpreter', {
-                method: 'POST',
-                body: `data=${encodeURIComponent(q)}`,
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            });
-            if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
-            const data = await resp.json();
-            const results = (data.elements || []).map((el: any) => ({
-                lat: el.lat || el.center?.lat,
-                lng: el.lon || el.center?.lon,
-                name: el.tags?.name || `${el.type}/${el.id}`,
-                tags: el.tags || {},
-            })).filter((r: any) => r.lat && r.lng);
+            let results: any[] = [];
+            if (preset.source === 'nws') {
+                results = await fetchNWSAlerts(bounds);
+            } else if (preset.source === 'wpc') {
+                results = await fetchWPCSurface();
+            } else if (preset.source === 'nhc') {
+                results = await fetchNHCStorms();
+            } else {
+                // Overpass rejects very large bboxes (HTTP 406). Skip if view is too wide.
+                const area = (bounds.getNorth() - bounds.getSouth()) * (bounds.getEast() - bounds.getWest());
+                if (area > 25) {
+                    console.warn(`OSINT ${key}: viewport too large for Overpass, zoom in`);
+                    setOsintLoading(prev => { const s = new Set(prev); s.delete(key); return s; });
+                    return;
+                }
+                const parts = (preset.query || '').split('=');
+                const tagFilter = parts[1] ? `["${parts[0]}"="${parts[1]}"]` : `["${parts[0]}"]`;
+                const s = bounds.getSouth(), w = bounds.getWest(), n = bounds.getNorth(), e = bounds.getEast();
+                const q = `[out:json][timeout:25];(node${tagFilter}(${s},${w},${n},${e});way${tagFilter}(${s},${w},${n},${e}););out center body 200;`;
+                const resp = await proxyFetch('https://overpass-api.de/api/interpreter', {
+                    method: 'POST',
+                    body: `data=${encodeURIComponent(q)}`,
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                });
+                if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
+                const data = await resp.json();
+                results = (data.elements || []).map((el: any) => ({
+                    lat: el.lat || el.center?.lat,
+                    lng: el.lon || el.center?.lon,
+                    name: el.tags?.name || `${el.type}/${el.id}`,
+                    source: 'overpass',
+                    category: el.tags?.amenity || el.tags?.shop || el.tags?.building || 'unknown',
+                    tags: el.tags || {},
+                })).filter((r: any) => r.lat && r.lng);
+            }
             setOsintCache(prev => ({ ...prev, [key]: { results, bbox } }));
         } catch (err) {
             console.error(`OSINT fetch ${key}:`, err);
@@ -182,6 +411,67 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
         map.on('moveend', handler);
         return () => { map.off('moveend', handler); };
     }, [scheduleOsintRefresh]);
+
+    // Fetch RainViewer metadata when a RainViewer layer is active
+    useEffect(() => {
+        const needRainViewer = activeWeatherLayers.has('radar') || activeWeatherLayers.has('precip_nowcast');
+        if (!needRainViewer) return;
+        if (rainViewerMeta) return;
+        const load = async () => {
+            try {
+                const resp = await proxyFetch('https://api.rainviewer.com/public/weather-maps.json');
+                if (!resp.ok) throw new Error(`RainViewer ${resp.status}`);
+                const data = await resp.json();
+                const host = data.host || 'https://tilecache.rainviewer.com';
+                const past = data.radar?.past || [];
+                const nowcast = data.radar?.nowcast || data.nowcast || [];
+                const radarFrame = past.length ? past[past.length - 1] : null;
+                const nowcastFrames = nowcast.map((f: any) => ({ time: f.time, path: f.path }));
+                if (radarFrame?.path) {
+                    setRainViewerMeta({ host, radarFrame, nowcastFrames });
+                }
+            } catch (err) {
+                console.error('RainViewer meta fetch:', err);
+            }
+        };
+        load();
+    }, [activeWeatherLayers, rainViewerMeta]);
+
+    // Add/remove weather tile overlays
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map) return;
+        Object.entries(WEATHER_LAYERS).forEach(([key, def]) => {
+            if (!activeWeatherLayers.has(key)) {
+                if (weatherLayerRefs.current[key]) {
+                    map.removeLayer(weatherLayerRefs.current[key]);
+                    delete weatherLayerRefs.current[key];
+                }
+                return;
+            }
+            const baseUrl = def.getUrl(forecastHour, rainViewerMeta || undefined);
+            if (!baseUrl) return; // wait for RainViewer meta
+            if (weatherLayerRefs.current[key]) {
+                map.removeLayer(weatherLayerRefs.current[key]);
+                delete weatherLayerRefs.current[key];
+            }
+            const layer = def.wms
+                ? L.tileLayer.wms(baseUrl, {
+                    layers: def.wms.layers,
+                    format: def.wms.format || 'image/png',
+                    transparent: def.wms.transparent !== false,
+                    opacity: def.opacity,
+                    bounds: def.bounds,
+                })
+                : L.tileLayer(baseUrl, { opacity: def.opacity, bounds: def.bounds });
+            layer.addTo(map);
+            weatherLayerRefs.current[key] = layer;
+        });
+        return () => {
+            Object.values(weatherLayerRefs.current).forEach(l => { try { map.removeLayer(l); } catch {} });
+            weatherLayerRefs.current = {};
+        };
+    }, [activeWeatherLayers, forecastHour, rainViewerMeta]);
 
     const filePath = propFilePath;
     const isStandalone = !filePath || filePath === 'cartoglyph';
@@ -347,15 +637,41 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
     }, [osintQuery, osintType]);
 
     const addOsintResult = useCallback((r: any) => {
-        if (!r.lat || !r.lng) return;
-        const id = `osint_${Date.now()}_${r.id}`;
-        const layer = project.layers.find(l => l.id === activeLayerId);
+        const id = `osint_${Date.now()}_${r.id || Math.random().toString(36).slice(2, 8)}`;
+        const color = r.color || '#f59e0b';
+        let feature: GeoFeature;
+        if (r.geometry?.type === 'Polygon' || r.geometry?.type === 'MultiPolygon') {
+            const ring = r.geometry.type === 'Polygon'
+                ? r.geometry.coordinates[0]
+                : r.geometry.coordinates[0][0];
+            feature = {
+                id, type: 'polygon', name: r.name, color, visible: true, layerId: activeLayerId,
+                coordinates: ring.map((c: number[]) => [c[1], c[0]] as [number, number]),
+                properties: { source: r.source, category: r.category, ...(r.tags || {}) },
+            };
+        } else if (r.geometry?.type === 'LineString' || r.geometry?.type === 'MultiLineString') {
+            const coords = r.geometry.type === 'LineString'
+                ? r.geometry.coordinates
+                : r.geometry.coordinates[0];
+            feature = {
+                id, type: 'line', name: r.name, color, visible: true, layerId: activeLayerId,
+                coordinates: coords.map((c: number[]) => [c[1], c[0]] as [number, number]),
+                properties: { source: r.source, category: r.category, ...(r.tags || {}) },
+            };
+        } else {
+            if (!r.lat || !r.lng) return;
+            feature = {
+                id, type: 'marker', name: r.name, color, visible: true, layerId: activeLayerId,
+                coordinates: [r.lat, r.lng] as [number, number],
+                properties: { source: r.source, category: r.category, ...(r.tags || {}) },
+            };
+        }
         updateProject(prev => ({
             ...prev,
-            features: [...prev.features, { id, type: 'marker' as const, name: r.name, coordinates: [r.lat, r.lng] as [number, number], color: '#f59e0b', visible: true, layerId: activeLayerId, properties: { source: r.source, category: r.category } }],
+            features: [...prev.features, feature],
             layers: prev.layers.map(l => l.id === activeLayerId ? { ...l, features: [...l.features, id] } : l),
         }));
-    }, [activeLayerId, project.layers, updateProject]);
+    }, [activeLayerId, updateProject]);
 
     // ---- Import/Export ----
 
@@ -448,9 +764,6 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                 <div className="flex items-center gap-0.5 px-1 py-0.5 theme-bg-tertiary rounded border theme-border mr-2">
                     <button onClick={() => setActiveTab('gis')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'gis' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <MapIcon size={12} /> GIS Map
-                    </button>
-                    <button onClick={() => setActiveTab('data')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'data' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
-                        <Download size={12} /> Data
                     </button>
                     <button onClick={() => setActiveTab('globe')} className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${activeTab === 'globe' ? 'bg-emerald-600 text-white' : 'theme-text-muted hover:theme-text-primary'}`}>
                         <Globe size={12} /> Globe
@@ -637,10 +950,10 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                     {!sidebarCollapsed && (
                         <div className="w-60 border-r theme-border flex flex-col theme-bg-secondary overflow-hidden">
                             <div className="flex border-b theme-border">
-                                {(['layers', 'properties', 'overlays', 'osint'] as const).map(tab => (
+                                {(['layers', 'properties', 'overlays', 'weather', 'osint'] as const).map(tab => (
                                     <button key={tab} onClick={() => setSidebarTab(tab)}
                                         className={`flex-1 px-2 py-1.5 text-xs transition-colors ${sidebarTab === tab ? 'text-emerald-400 border-b-2 border-emerald-400' : 'theme-text-muted hover:theme-text-primary'}`}>
-                                        {tab === 'layers' ? 'Layers' : tab === 'properties' ? 'Props' : tab === 'overlays' ? 'Ref' : 'OSINT'}
+                                        {tab === 'layers' ? 'Layers' : tab === 'properties' ? 'Props' : tab === 'overlays' ? 'Ref' : tab === 'weather' ? 'Wx' : 'OSINT'}
                                     </button>
                                 ))}
                             </div>
@@ -772,6 +1085,86 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                                     </div>
                                 )}
 
+                                {sidebarTab === 'weather' && (
+                                    <div className="space-y-3">
+                                        <p className="text-[10px] theme-text-muted">Live NOAA forecast overlays and fetchable weather geography. Set forecast time for future products.</p>
+
+                                        {/* Forecast time slider */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-[10px] theme-text-muted uppercase tracking-wider font-medium">Forecast time</span>
+                                                <span className="text-[10px] text-emerald-400 font-mono">T+{forecastHour}h</span>
+                                            </div>
+                                            <input
+                                                type="range" min={0} max={18} step={1} value={forecastHour}
+                                                onChange={(e) => setForecastHour(parseInt(e.target.value, 10))}
+                                                className="w-full accent-emerald-500"
+                                            />
+                                            <div className="flex justify-between text-[9px] theme-text-muted mt-0.5">
+                                                <span>Now</span>
+                                                <span>+6h</span>
+                                                <span>+12h</span>
+                                                <span>+18h</span>
+                                            </div>
+                                        </div>
+
+                                        {/* NOAA nowCOAST WMS overlays */}
+                                        <div>
+                                            <span className="text-[10px] theme-text-muted uppercase tracking-wider font-medium">Weather overlays</span>
+                                            <div className="mt-1 space-y-0.5">
+                                                {Object.entries(WEATHER_LAYERS).map(([key, layer]) => (
+                                                    <label key={key} className="flex items-center gap-2 px-1.5 py-1 rounded hover:theme-bg-tertiary cursor-pointer text-xs">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={activeWeatherLayers.has(key)}
+                                                            onChange={() => setActiveWeatherLayers(prev => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; })}
+                                                            className="accent-emerald-500"
+                                                        />
+                                                        <span className="theme-text-primary">{layer.name}</span>
+                                                        {layer.forecastable && <span className="text-[9px] theme-text-muted">time-aware</span>}
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {/* Fetchable weather vector layers */}
+                                        <div>
+                                            <span className="text-[10px] theme-text-muted uppercase tracking-wider font-medium">Add to GIS layer</span>
+                                            <div className="mt-1 space-y-0.5">
+                                                {['nws_alerts', 'wpc_surface', 'nhc_storms'].map(key => {
+                                                    const preset = OSINT_PRESETS[key];
+                                                    return (
+                                                        <div key={key} className="flex items-center gap-2 px-1.5 py-1 rounded hover:theme-bg-tertiary text-xs group">
+                                                            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: preset.color }} />
+                                                            <span className="theme-text-primary flex-1">{preset.label}</span>
+                                                            <button
+                                                                onClick={() => fetchOsintCategory(key)}
+                                                                disabled={osintLoading.has(key)}
+                                                                className="text-[10px] px-1.5 py-0.5 bg-emerald-600/20 text-emerald-400 rounded hover:bg-emerald-600/30 disabled:opacity-50"
+                                                            >
+                                                                {osintLoading.has(key) ? '...' : 'Fetch'}
+                                                            </button>
+                                                            {osintCache[key] && (
+                                                                <button
+                                                                    onClick={() => osintCache[key].results.forEach(addOsintResult)}
+                                                                    className="opacity-0 group-hover:opacity-100 p-0.5 theme-text-muted hover:text-emerald-400 transition-opacity"
+                                                                    title="Add all to active layer"
+                                                                >
+                                                                    <Plus size={10} />
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        {activeWeatherLayers.size > 0 && (
+                                            <button onClick={() => { setActiveWeatherLayers(new Set()); setForecastHour(0); }} className="text-[10px] text-red-400 hover:text-red-300">Clear weather overlays</button>
+                                        )}
+                                    </div>
+                                )}
+
                                 {sidebarTab === 'osint' && (
                                     <div className="space-y-3">
                                         <p className="text-[10px] theme-text-muted">Toggle OSM data layers for current viewport. Auto-refreshes when you pan.</p>
@@ -787,12 +1180,21 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                                                 <span className="text-[10px] theme-text-muted uppercase tracking-wider font-medium">{category}</span>
                                                 <div className="mt-1 space-y-0.5">
                                                     {items.map(([key, preset]: [string, any]) => (
-                                                        <label key={key} className="flex items-center gap-2 px-1.5 py-1 rounded hover:theme-bg-tertiary cursor-pointer text-xs">
+                                                        <label key={key} className="flex items-center gap-2 px-1.5 py-1 rounded hover:theme-bg-tertiary cursor-pointer text-xs group">
                                                             <input type="checkbox" checked={osintVisible.has(key)} onChange={() => toggleOsintLayer(key)} className="accent-emerald-500" />
                                                             <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: preset.color }} />
                                                             <span className="theme-text-primary flex-1">{preset.label}</span>
                                                             {osintLoading.has(key) && <span className="text-[9px] text-emerald-400 animate-pulse">loading</span>}
                                                             {osintCache[key] && <span className="text-[9px] theme-text-muted">{osintCache[key].results.length}</span>}
+                                                            {osintCache[key] && (
+                                                                <button
+                                                                    onClick={(e) => { e.preventDefault(); osintCache[key].results.forEach(addOsintResult); }}
+                                                                    className="opacity-0 group-hover:opacity-100 p-0.5 theme-text-muted hover:text-emerald-400 transition-opacity"
+                                                                    title={`Add all ${preset.geomType || 'points'} to active layer`}
+                                                                >
+                                                                    <Plus size={10} />
+                                                                </button>
+                                                            )}
                                                         </label>
                                                     ))}
                                                 </div>
@@ -845,127 +1247,25 @@ const Tezcat = ({ filePath: propFilePath }: { filePath?: string }) => {
                     </button>
 
                     {/* Map */}
-                    <GISMapView
-                        project={project}
-                        onProjectChange={updateProject}
-                        mode={mode}
-                        onModeChange={setMode}
-                        selectedFeatureId={selectedFeatureId}
-                        onSelectFeature={setSelectedFeatureId}
-                        mapRef={mapRef}
-                        activeOverlays={activeOverlays}
-                        activeTileOverlays={activeTileOverlays}
-                        osintLayers={Array.from(osintVisible).filter(k => osintCache[k]).map(k => ({
-                            key: k,
-                            color: OSINT_PRESETS[k]?.color || '#f59e0b',
-                            markers: osintCache[k].results,
-                        }))}
-                    />
-                </div>
-            )}
+                    <div className="relative flex-1">
+                        <GISMapView
+                            project={project}
+                            onProjectChange={updateProject}
+                            mode={mode}
+                            onModeChange={setMode}
+                            selectedFeatureId={selectedFeatureId}
+                            onSelectFeature={setSelectedFeatureId}
+                            mapRef={mapRef}
+                            className="absolute inset-0 w-full h-full"
+                            activeOverlays={activeOverlays}
+                            activeTileOverlays={activeTileOverlays}
+                            osintLayers={Array.from(osintVisible).filter(k => osintCache[k]).map(k => ({
+                                key: k,
+                                color: OSINT_PRESETS[k]?.color || '#f59e0b',
+                                markers: osintCache[k].results,
+                            }))}
+                        />
 
-            {activeTab === 'data' && (
-                <div className="flex-1 overflow-auto p-4">
-                    <div className="space-y-4">
-                        <h3 className="text-sm font-semibold theme-text-primary">Open Geospatial Data Sources</h3>
-                        <p className="text-xs theme-text-muted">Browse and import open data into your GIS project</p>
-
-                        {[
-                            {
-                                name: 'Natural Earth', category: 'Boundaries & Culture', icon: '🌍',
-                                desc: 'Countries, states, coastlines, rivers, populated places (1:10m/50m/110m)',
-                                datasets: [
-                                    { label: 'Countries (110m)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson' },
-                                    { label: 'States/Provinces (50m)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces.geojson' },
-                                    { label: 'Populated Places (50m)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_populated_places.geojson' },
-                                    { label: 'Rivers (50m)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson' },
-                                    { label: 'Lakes (50m)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_lakes.geojson' },
-                                    { label: 'Coastline (110m)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_coastline.geojson' },
-                                ],
-                            },
-                            {
-                                name: 'OpenStreetMap (Overpass)', category: 'Infrastructure & POI', icon: '🗺️',
-                                desc: 'Roads, buildings, amenities, land use — query by area',
-                                datasets: [
-                                    { label: 'Hospitals (viewport)', overpass: '[out:json];node["amenity"="hospital"]({{bbox}});out;' },
-                                    { label: 'Schools (viewport)', overpass: '[out:json];node["amenity"="school"]({{bbox}});out;' },
-                                    { label: 'Restaurants (viewport)', overpass: '[out:json];node["amenity"="restaurant"]({{bbox}});out;' },
-                                    { label: 'Charging Stations (viewport)', overpass: '[out:json];node["amenity"="charging_station"]({{bbox}});out;' },
-                                    { label: 'Airports (global)', overpass: '[out:json];node["aeroway"="aerodrome"]["iata"]({{bbox}});out;' },
-                                    { label: 'Power Plants (viewport)', overpass: '[out:json];way["power"="plant"]({{bbox}});out center;' },
-                                ],
-                            },
-                            {
-                                name: 'GEBCO', category: 'Elevation & Bathymetry', icon: '🌊',
-                                desc: 'Global ocean depth + land elevation (15 arc-second grid)',
-                                datasets: [
-                                    { label: 'GEBCO Grid Viewer', link: 'https://download.gebco.net/' },
-                                ],
-                            },
-                            {
-                                name: 'CHIRPS', category: 'Climate & Weather', icon: '🌧️',
-                                desc: 'Global precipitation data (0.05° daily, 1981-present)',
-                                datasets: [
-                                    { label: 'CHIRPS Data Portal', link: 'https://data.chc.ucsb.edu/products/CHIRPS-2.0/' },
-                                ],
-                            },
-                            {
-                                name: 'Open-Elevation', category: 'Elevation API', icon: '⛰️',
-                                desc: 'Free elevation lookups from SRTM data',
-                                datasets: [
-                                    { label: 'Elevation API', link: 'https://api.open-elevation.com/api/v1/lookup' },
-                                ],
-                            },
-                            {
-                                name: 'GeoJSON.io Samples', category: 'Example Data', icon: '📐',
-                                desc: 'Quick test datasets',
-                                datasets: [
-                                    { label: 'US States', url: 'https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json' },
-                                    { label: 'World Airports', url: 'https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.json' },
-                                ],
-                            },
-                        ].map((source) => (
-                            <div key={source.name} className="theme-bg-secondary rounded-lg p-3 border theme-border">
-                                <div className="flex items-center gap-2 mb-2">
-                                    <span className="text-lg">{source.icon}</span>
-                                    <div>
-                                        <div className="text-sm font-medium theme-text-primary">{source.name}</div>
-                                        <div className="text-[10px] theme-text-muted">{source.category}</div>
-                                    </div>
-                                </div>
-                                <p className="text-xs theme-text-muted mb-2">{source.desc}</p>
-                                <div className="flex flex-wrap gap-1">
-                                    {source.datasets.map((ds: any) => (
-                                        <button
-                                            key={ds.label}
-                                            onClick={async () => {
-                                                if (ds.url) {
-                                                    try {
-                                                        const resp = await proxyFetch(ds.url);
-                                                        const data = await resp.json();
-                                                        const features = geoJSONToFeatures(data, 'imported', '#3b82f6');
-                                                        updateProject(prev => ({ ...prev, features: [...prev.features, ...features] }));
-                                                        setActiveTab('gis');
-                                                    } catch (err) {
-                                                        console.error('Failed to load dataset:', err);
-                                                    }
-                                                } else if (ds.overpass) {
-                                                    // Would need current map bounds — for now open in browser
-                                                    const url = `https://overpass-turbo.eu/?Q=${encodeURIComponent(ds.overpass)}`;
-                                                    window.open(url, '_blank');
-                                                } else if (ds.link) {
-                                                    window.open(ds.link, '_blank');
-                                                }
-                                            }}
-                                            className="px-2 py-1 text-[10px] rounded border theme-border theme-hover theme-text-secondary flex items-center gap-1"
-                                        >
-                                            {ds.url ? <Download size={10} /> : ds.overpass ? <Search size={10} /> : <Globe size={10} />}
-                                            {ds.label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        ))}
                     </div>
                 </div>
             )}

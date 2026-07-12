@@ -9,6 +9,7 @@ export interface IElectronAPI {
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
   proxyFetch: (url: string, options?: any) => Promise<any>;
+  proxyTile: (url: string) => Promise<{ ok: boolean; status: number; data?: string; error?: string }>;
   windowControls: {
     minimize: () => void;
     maximize: () => void;
@@ -35,6 +36,7 @@ contextBridge.exposeInMainWorld('api', {
   readFileContent: (filePath: string) => ipcRenderer.invoke('read-file-content', filePath),
   writeFileContent: (filePath: string, content: string) => ipcRenderer.invoke('write-file-content', filePath, content),
   proxyFetch: (url: string, options?: any) => ipcRenderer.invoke('proxy-fetch', url, options),
+  proxyTile: (url: string) => ipcRenderer.invoke('proxy-tile', url),
   windowControls: {
     minimize: () => ipcRenderer.send('window-minimize'),
     maximize: () => ipcRenderer.send('window-maximize'),

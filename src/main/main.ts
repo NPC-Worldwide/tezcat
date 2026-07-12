@@ -251,6 +251,19 @@ ipcMain.handle('proxy-fetch', async (_event, url, options = {}) => {
   }
 });
 
+ipcMain.handle('proxy-tile', async (_event, url: string) => {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return { ok: false, status: resp.status };
+    const arrayBuffer = await resp.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString('base64');
+    const contentType = resp.headers.get('content-type') || 'image/png';
+    return { ok: true, status: resp.status, data: `data:${contentType};base64,${base64}` };
+  } catch (err) {
+    return { ok: false, status: 0, error: (err as Error).message };
+  }
+});
+
 ipcMain.on('window-close', () => mainWindow?.close());
 ipcMain.on('window-minimize', () => mainWindow?.minimize());
 ipcMain.on('window-maximize', () => {
