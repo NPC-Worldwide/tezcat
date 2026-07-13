@@ -52,16 +52,29 @@ jobs:
         if: runner.os == 'macOS'
         env:
           P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          P12_B64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
         run: |
-          echo "${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}" | base64 --decode > build_cert.p12
+          set -euo pipefail
+          if [ -z "$P12_B64" ] || [ -z "$P12_PASSWORD" ]; then
+            echo "Apple signing secrets are not configured." >&2
+            exit 1
+          fi
+          echo "$P12_B64" | base64 --decode > build_cert.p12
+          if [ ! -s build_cert.p12 ]; then
+            echo "Decoded certificate file is empty." >&2
+            exit 1
+          fi
           security create-keychain -p "$P12_PASSWORD" build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p "$P12_PASSWORD" build.keychain
           security set-keychain-settings -t 3600 -u build.keychain
           security import build_cert.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$P12_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
           echo "CSC_LINK=$(pwd)/build_cert.p12" >> $GITHUB_ENV
           echo "CSC_KEY_PASSWORD=$P12_PASSWORD" >> $GITHUB_ENV
+          echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> $GITHUB_ENV
+        shell: bash
 
       - name: Build Electron app
         shell: bash
